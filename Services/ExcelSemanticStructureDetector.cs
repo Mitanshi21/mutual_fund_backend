@@ -54,8 +54,6 @@ namespace mutual_fund_backend.Services
         "sub total",
         "subtotal",
         "grand total",
-        "figure",
-        "figures",
         "riskometer",
         "note",
         "notes",
@@ -150,7 +148,7 @@ namespace mutual_fund_backend.Services
             date = DateTime.MinValue;
 
             // Must contain as on / ended
-            if (!value.Contains("as on") && !value.Contains("ended"))
+            if (!value.Contains("as on"))
                 return false;
 
             // 🔍 Extract date-like part ONLY
@@ -158,13 +156,18 @@ namespace mutual_fund_backend.Services
                 value,
                 @"(\d{1,2}[-/\.]\d{1,2}[-/\.]\d{4})|" +          // 30-11-2025
                 @"(\d{4}[-/\.]\d{1,2}[-/\.]\d{1,2})|" +          // 2025-11-30
-                @"(\w+\s+\d{1,2},?\s+\d{4})|" +                  // November 30, 2025
-                @"(\d{1,2}\s+\w+\s+\d{4})",                      // 30 November 2025
+                @"((jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2},?\s*\d{4})|" +
+                @"(\d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{4})",
                 RegexOptions.IgnoreCase
             );
 
+
             if (!match.Success)
+            {
+                Console.Write("As On Date:", value);
+
                 return false;
+            }
 
             string dateText = match.Value;
 
