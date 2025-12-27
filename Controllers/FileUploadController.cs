@@ -1,5 +1,6 @@
 ﻿using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using mutual_fund_backend.Services;
 
 namespace mutual_fund_backend.Controllers
 {
@@ -8,29 +9,26 @@ namespace mutual_fund_backend.Controllers
     public class FileUploadController : ControllerBase
     {
         [HttpPost("upload-excel")]
-        [RequestSizeLimit(100 * 1024 * 1024)]
-        public async Task<IActionResult> UploadExcel([FromForm] List<IFormFile> files)
+        public IActionResult UploadExcel([FromForm] List<IFormFile> files)
         {
-            if(files == null || files.Count == 0)
-            {
-                return BadRequest(new { message = "No files uploaded." });
-            }
-
+            // Save files to temp folder
             foreach (var file in files)
             {
-                if (file.Length > 0)
-                {
-                    var extension = System.IO.Path.GetExtension(file.FileName).ToLower();
-                    if (extension != ".xls" && extension != ".xlsx")
-                    {
-                        return BadRequest(new { message = "Invalid file format. Please upload an Excel file." });
-                    }
+                var path = Path.Combine("Uploads", Guid.NewGuid() + Path.GetExtension(file.FileName));
+                using var stream = new FileStream(path, FileMode.Create);
+                file.CopyTo(stream);
 
-                }
+                // Fire-and-forget processing
+                Task.Run(() =>
+                {
+                    var processor = new ExcelProcessingService();
+                    processor.ProcessExcel(path);
+                });
             }
 
-            return Ok(new { message = "Excel file uploaded successfully." });
+            return Ok(new { message = "Files uploaded successfully. Processing started." });
         }
+
 
     }
 }

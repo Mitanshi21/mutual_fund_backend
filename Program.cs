@@ -1,6 +1,10 @@
 using Microsoft.EntityFrameworkCore;
 using mutual_fund_backend.Data;
 
+System.Text.Encoding.RegisterProvider(
+    System.Text.CodePagesEncodingProvider.Instance
+);
+
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddCors(options =>
