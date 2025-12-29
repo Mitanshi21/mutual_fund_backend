@@ -1,0 +1,6 @@
+@mutual_fund_backend_HostAddress = http://localhost:5031
+
+GET {{mutual_fund_backend_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
