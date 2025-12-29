@@ -17,6 +17,8 @@ namespace mutual_fund_backend.Services
     {
         public SemanticRowType Type { get; set; }
         public string Value { get; set; }
+
+        public bool LooksLikeFund { get; set; }
     }
 
     public class ExcelSemanticStructureDetector
@@ -85,13 +87,17 @@ namespace mutual_fund_backend.Services
 
             string joined = string.Join(" ", cleaned).ToLower();
 
-            // 1️⃣ AMC NAME
-            if (IsLikelyAmcName(cleaned))
+            // 1️⃣ FUND-LIKE ROW (AMC or Section decided later)
+            if (LooksLikeFundName(cleaned))
+            {
                 return new SemanticRowResult
                 {
-                    Type = SemanticRowType.AmcName,
-                    Value = cleaned[0]
+                    Type = SemanticRowType.AmcName, // tentative
+                    Value = cleaned[0],
+                    LooksLikeFund = true
                 };
+            }
+
 
             // 2️⃣ AS-ON DATE
             if (IsAsOnDate(joined))
@@ -100,6 +106,14 @@ namespace mutual_fund_backend.Services
                     Type = SemanticRowType.AsOnDate,
                     Value = cleaned[0]
                 };
+
+            // 6️⃣ SKIP (LAST)
+            if (SkipKeywords.Any(k => joined.Contains(k)))
+                return new SemanticRowResult { Type = SemanticRowType.Skip };
+
+            // 5️⃣ DATA
+            if (IsDataRow(cleaned))
+                return new SemanticRowResult { Type = SemanticRowType.Data };
 
             // 3️⃣ SECTION
             foreach (var s in SectionKeywords)
@@ -121,13 +135,9 @@ namespace mutual_fund_backend.Services
             if (headerMatches >= 3)
                 return new SemanticRowResult { Type = SemanticRowType.Header };
 
-            // 5️⃣ DATA
-            if (IsDataRow(cleaned))
-                return new SemanticRowResult { Type = SemanticRowType.Data };
+           
 
-            // 6️⃣ SKIP (LAST)
-            if (SkipKeywords.Any(k => joined.Contains(k)))
-                return new SemanticRowResult { Type = SemanticRowType.Skip };
+           
 
             // 7️⃣ DEFAULT
             return new SemanticRowResult { Type = SemanticRowType.Skip };
@@ -137,13 +147,14 @@ namespace mutual_fund_backend.Services
         // HELPERS
         // =============================
 
-        private static bool IsLikelyAmcName(List<string> row)
+        private static bool LooksLikeFundName(List<string> row)
         {
             string value = row[0].ToLower();
             return row.Count == 1 &&
                    (value.Contains("mutual fund") ||
-                    value.Contains("fund"));
+                    value.Contains("fund")); ;
         }
+
 
         private static bool IsAsOnDate(string value)
         {
@@ -219,7 +230,7 @@ namespace mutual_fund_backend.Services
 
             // 2️ Must contain instrument name (text-heavy cell)
             bool hasTextCell = cells.Any(c =>
-                c.Any(char.IsLetter) && c.Length > 5);
+                c.Any(char.IsLetter) && c.Length > 3);
 
             if (!hasTextCell)
                 return false;

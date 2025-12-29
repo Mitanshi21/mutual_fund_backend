@@ -3,8 +3,11 @@ using mutual_fund_backend.Services;
 
 public class ExcelProcessingService
 {
-    public void ProcessExcel(string filePath)
+    public async Task ProcessExcel(string filePath, int amc_Id, int portfolio_Type_Id)
     {
+        string currentAmc = null;
+        string currentSection = null;
+
         if (!File.Exists(filePath))
             return;
 
@@ -27,9 +30,51 @@ public class ExcelProcessingService
                 // 🔹 Now plug into your semantic detector
                 var result = ExcelSemanticStructureDetector.Analyze(rowValues);
 
-                Console.WriteLine(
-                    $"[{result.Type}] => {string.Join(" | ", rowValues)}"
-                );
+                switch (result.Type)
+                {
+                    case SemanticRowType.AmcName:
+
+                        if (result.LooksLikeFund)
+                        {
+                            if (string.IsNullOrEmpty(currentAmc))
+                            {
+                                // ✅ FIRST fund = AMC
+                                currentAmc = result.Value;
+                                Console.WriteLine($"[AMC] => {currentAmc}");
+                            }
+                            else
+                            {
+                                // ✅ Later fund = SECTION
+                                currentSection = result.Value;
+                                Console.WriteLine($"[Section] => {currentSection}");
+                            }
+                        }
+                        break;
+
+                    case SemanticRowType.Section:
+                        currentSection = result.Value;
+                        Console.WriteLine($"[Section] => {currentSection}");
+                        break;
+
+                    case SemanticRowType.Data:
+                        Console.WriteLine($"[Data] => {string.Join(" | ", rowValues)}");
+                        break;
+
+                    case SemanticRowType.AsOnDate:
+                        Console.WriteLine($"[As On Date] => {result.Value}");
+                        break;
+
+                    case SemanticRowType.Header:
+                        Console.WriteLine($"[Header] => {string.Join(" | ", rowValues)}");
+                        break;
+
+                    case SemanticRowType.Skip:
+                        Console.WriteLine($"[Skip]=>{string.Join(" | ", rowValues)}");
+                        break;
+                }
+
+
+                await Task.Yield();
 
             }
 

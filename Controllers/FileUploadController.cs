@@ -6,25 +6,60 @@ namespace mutual_fund_backend.Controllers
     [ApiController]
     public class FileUploadController : Controller
     {
-        [HttpPost("upload-excel")]
-        public IActionResult UploadExcel([FromForm] List<IFormFile> files)
-        {
-            // Save files to temp folder
-            foreach (var file in files)
-            {
-                var path = Path.Combine("Uploads", Guid.NewGuid() + Path.GetExtension(file.FileName));
-                using var stream = new FileStream(path, FileMode.Create);
-                file.CopyTo(stream);
+       [HttpPost("upload-excel")]
+[Consumes("multipart/form-data")]
+public async Task<IActionResult> UploadExcel([FromForm] MultiUploadRequest request)
+{
+    if (request.Rows == null || request.Rows.Count == 0)
+        return BadRequest("No upload rows provided");
 
-                // Fire-and-forget processing
-                Task.Run(() =>
-                {
-                    var processor = new ExcelProcessingService();
-                    processor.ProcessExcel(path);
-                });
+    foreach (var row in request.Rows)
+    {
+        if (row.Amc_Id <= 0 || row.Portfolio_Type_Id <= 0)
+            return BadRequest("Invalid AMC or Portfolio in one of the rows");
+
+        if (row.Files == null || row.Files.Count == 0)
+            return BadRequest("One of the rows has no files");
+
+        foreach (var file in row.Files)
+        {
+            var path = Path.Combine(
+                "Uploads",
+                Guid.NewGuid() + Path.GetExtension(file.FileName)
+            );
+
+            using (var stream = new FileStream(path, FileMode.Create))
+            {
+                await file.CopyToAsync(stream);
             }
 
-            return Ok(new { message = "Files uploaded successfully. Processing started." });
+            var processor = new ExcelProcessingService();
+
+            await processor.ProcessExcel(
+                path,
+                row.Amc_Id,
+                row.Portfolio_Type_Id
+            );
         }
+    }
+
+    return Ok(new
+    {
+        message = "All rows and files processed successfully"
+    });
+}
+        public class UploadRow
+        {
+            public int Amc_Id { get; set; }
+            public int Portfolio_Type_Id { get; set; }
+            public List<IFormFile> Files { get; set; }
+        }
+
+        public class MultiUploadRequest
+        {
+            public List<UploadRow> Rows { get; set; }
+        }
+
+
     }
 }
