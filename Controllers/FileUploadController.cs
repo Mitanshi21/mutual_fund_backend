@@ -65,7 +65,7 @@ namespace mutual_fund_backend.Controllers
                         await file.CopyToAsync(stream);
                     }
 
-                    var processor = new ExcelProcessingService();
+                    var processor = new ExcelProcessingService(_context);
 
                     await processor.ProcessExcel(
                         path,

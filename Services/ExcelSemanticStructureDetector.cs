@@ -10,7 +10,8 @@ namespace mutual_fund_backend.Services
         Section,
         Header,
         Data,
-        Skip
+        Skip,
+        Grand_Total
     }
 
     public class SemanticRowResult
@@ -63,7 +64,6 @@ namespace mutual_fund_backend.Services
         "total",
         "sub total",
         "subtotal",
-        "grand total",
         "riskometer",
         "note",
         "notes",
@@ -107,6 +107,15 @@ namespace mutual_fund_backend.Services
                     Value = cleaned[0]
                 };
 
+            if (IsGrandTotal(cleaned))
+            {
+                return new SemanticRowResult
+                {
+                    Type = SemanticRowType.Grand_Total,
+                    Value = cleaned[0]
+                };
+            }
+
             // 6️⃣ SKIP (LAST)
             if (SkipKeywords.Any(k => joined.Contains(k)))
                 return new SemanticRowResult { Type = SemanticRowType.Skip };
@@ -135,12 +144,24 @@ namespace mutual_fund_backend.Services
             if (headerMatches >= 3)
                 return new SemanticRowResult { Type = SemanticRowType.Header };
 
-           
-
-           
-
             // 7️⃣ DEFAULT
             return new SemanticRowResult { Type = SemanticRowType.Skip };
+        }
+
+        private static bool IsGrandTotal(List<string?> row)
+        {
+            // 1. Check if the text contains "grand total" (Case insensitive)
+            string joined = string.Join(" ", row).ToLower();
+            if (!joined.Contains("grand total"))
+                return false;
+
+            // 2. Ensure there is actually a numeric value in this row (the total amount)
+            // This prevents matching a footer note text that just mentions "Grand Total"
+            bool hasNumber = row.Any(c =>
+                decimal.TryParse(c?.Replace(",", "").Replace("%", "").Trim(), out _)
+            );
+
+            return hasNumber;
         }
 
         // =============================
@@ -156,13 +177,13 @@ namespace mutual_fund_backend.Services
         }
 
 
-        private static bool IsAsOnDate(string value)
+        public static bool IsAsOnDate(string value)
         {
             return TryParseAsOnDate(value, out _);
         }
 
 
-        private static bool TryParseAsOnDate(string value, out DateTime date)
+        public static bool TryParseAsOnDate(string value, out DateTime date)
         {
             date = DateTime.MinValue;
 
@@ -216,7 +237,7 @@ namespace mutual_fund_backend.Services
         }
 
 
-        private static bool IsDataRow(List<string> row)
+        public static bool IsDataRow(List<string> row)
         {
             // Clean cells
             var cells = row
