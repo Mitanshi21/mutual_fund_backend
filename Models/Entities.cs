@@ -10,12 +10,12 @@ namespace mutual_fund_backend.Models
         public string amcname { get; set; }
     }
 
-    [Table("tbl_fund")]
+    [Table("tbl_scheme_fund_names")]
     public class Fund
     {
         public int id { get; set; }
         public int amc_id { get; set; }
-        public string fund_name { get; set; }
+        public string scheme_name { get; set; }
     }
 
     [Table("tbl_portfolio_snapshot")]
@@ -82,6 +82,7 @@ namespace mutual_fund_backend.Models
     {
         public int id { get; set; }
         public string fileName { get; set; }
+        public int disclosure_portfolio_id { get; set; }
         public DateTime created_at { get; set; }
     }
 }

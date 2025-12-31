@@ -25,7 +25,7 @@ namespace mutual_fund_backend.Controllers
         [HttpGet]
         public async Task<ActionResult<IEnumerable<Amc>>> GetAMCs()
         {
-            return await _context.AMCs.ToListAsync();
+            return await _context.AMCs.OrderBy(a=>a.amcname).ToListAsync();
         }
     }
 }

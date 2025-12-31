@@ -30,16 +30,15 @@ namespace mutual_fund_backend.Services
         "reverse repo",
         "debt instrument",
         "money market instrument",
-        "certificate of deposit",
-        "commercial paper",
-        "net receivable / (payables)",
-        "treasury bill",
+        //"certificate of deposit",
+        //"commercial paper",
+        //"treasury bill",
         "others",
         "reit/invit instrument",
         "corporate debt market development fund",
         "exchange traded fund",
         "interest rate swaps",
-        "securitised debt",
+        //"securitised debt",
         "mutual fund units",
         "commodities related",
         "government securities"
@@ -68,15 +67,17 @@ namespace mutual_fund_backend.Services
         "note",
         "notes",
         "disclaimer",
-        "footnote"
+        "footnote",
+        "net receivable"
     };
 
         // =============================
         // ENTRY POINT
         // =============================
 
-        public static SemanticRowResult Analyze(List<string> row)
+        public static SemanticRowResult Analyze(List<string> row, HashSet<string> validFundNames)
         {
+            //Console.WriteLine("Row Data: " + string.Join(", ", row));
             var cleaned = row
                 .Select(c => c?.Trim())
                 .Where(c => !string.IsNullOrWhiteSpace(c))
@@ -88,16 +89,26 @@ namespace mutual_fund_backend.Services
             string joined = string.Join(" ", cleaned).ToLower();
 
             // 1️⃣ FUND-LIKE ROW (AMC or Section decided later)
-            if (LooksLikeFundName(cleaned))
+            //if (LooksLikeFundName(cleaned))
+            //{
+            //    return new SemanticRowResult
+            //    {
+            //        Type = SemanticRowType.AmcName, // tentative
+            //        Value = cleaned[0],
+            //        LooksLikeFund = true
+            //    };
+            //}
+
+            string foundFundName = GetFundNameFromRow(row, validFundNames);
+            if (foundFundName != null)
             {
+
                 return new SemanticRowResult
                 {
-                    Type = SemanticRowType.AmcName, // tentative
-                    Value = cleaned[0],
-                    LooksLikeFund = true
+                    Type = SemanticRowType.AmcName,
+                    Value = foundFundName // This will be "Bajaj Finserv..." (not "BFBPSU")
                 };
             }
-
 
             // 2️⃣ AS-ON DATE
             if (IsAsOnDate(joined))
@@ -125,15 +136,19 @@ namespace mutual_fund_backend.Services
                 return new SemanticRowResult { Type = SemanticRowType.Data };
 
             // 3️⃣ SECTION
-            foreach (var s in SectionKeywords)
+            foreach (var cell in cleaned)
             {
-                if (joined.Contains(s))
+                // Check if THIS specific cell contains a section keyword
+                foreach (var s in SectionKeywords)
                 {
-                    return new SemanticRowResult
+                    if (cell.ToLower().Contains(s))
                     {
-                        Type = SemanticRowType.Section,
-                        Value = cleaned[0]
-                    };
+                        return new SemanticRowResult
+                        {
+                            Type = SemanticRowType.Section,
+                            Value = cell // ✅ Return "Debt Instruments", not "GOI4584"
+                        };
+                    }
                 }
             }
 
@@ -168,15 +183,94 @@ namespace mutual_fund_backend.Services
         // HELPERS
         // =============================
 
-        private static bool LooksLikeFundName(List<string> row)
+        //private static bool LooksLikeFundName(List<string> row)
+        //{
+        //    string value = row[0].ToLower();
+        //    return row.Count == 1 &&
+        //           (value.Contains("mutual fund") ||
+        //            value.Contains("fund")); ;
+        //}
+
+        //private static string GetFundNameFromRow(List<string> row)
+        //{
+        //    var cells = row.Where(x => !string.IsNullOrWhiteSpace(x)).ToList();
+
+        //    // Safety: AMC Header usually doesn't have more than 2-3 bits of info (Code + Name)
+        //    // If a row has 5+ columns, it's likely a Data Row, not a Fund Name header.
+        //    if (cells.Count == 0 || cells.Count > 3) return null;
+
+        //    foreach (var cell in cells)
+        //    {
+        //        //Console.WriteLine("Cell: " + cell);
+
+        //        string val = cell.ToLower();
+
+        //        // Check for keywords in THIS specific cell
+        //        if (val.Contains("mutual fund") || val.Contains("fund"))
+        //        {
+        //            // Return the cell that actually holds the name (e.g. the 2nd column)
+        //            return cell;
+        //        }
+        //    }
+
+        //    return null; // No fund name found
+        //}
+
+        private static string GetFundNameFromRow(List<string> row, HashSet<string> validFundNames)
         {
-            string value = row[0].ToLower();
-            return row.Count == 1 &&
-                   (value.Contains("mutual fund") ||
-                    value.Contains("fund")); ;
+            var cells = row.Where(x => !string.IsNullOrWhiteSpace(x)).ToList();
+
+            // Safety: Fund Name headers are usually short (1-3 cells max)
+            if (cells.Count == 0 || cells.Count > 3) return null;
+
+            foreach (var cell in cells)
+            {
+                // 1. Normalize the cell value EXACTLY like we did for the DB list
+                string normalizedCell = NormalizeNameAggressive(cell);
+
+                // 2. CHECK: Does this exist in our whitelist?
+                if (validFundNames.Contains(normalizedCell))
+                {
+                    return cell; // ✅ FOUND IT! Return the original string.
+                }
+
+                // 3. (Optional) Partial Match Fallback
+                // If exact match fails, check if the DB name contains this cell or vice versa
+                // useful if Excel has "Axis Bluechip" but DB has "Axis Bluechip Fund"
+                bool partialMatch = validFundNames.Any(dbName => dbName.Contains(normalizedCell) || normalizedCell.Contains(dbName));
+                if (partialMatch) return cell;
+            }
+
+            return null;
         }
 
+        // 🟢 Re-use your Aggressive Normalizer here (Make it public static so Detector can use it)
+        public static string NormalizeNameAggressive(string input)
+        {
+            if (string.IsNullOrWhiteSpace(input)) return "";
+            string str = input.ToLower();
 
+            // Standardize Months
+            str = str.Replace("january", "jan").Replace("february", "feb").Replace("march", "mar")
+                     .Replace("april", "apr").Replace("june", "jun").Replace("july", "jul")
+                     .Replace("august", "aug").Replace("september", "sep").Replace("sept", "sep")
+                     .Replace("october", "oct").Replace("november", "nov").Replace("december", "dec");
+
+            // Replace separators
+            str = str.Replace('-', ' ').Replace('_', ' ').Replace('.', ' ').Replace(':', ' ');
+
+            // Split letter/number (IBX50 -> IBX 50)
+            str = System.Text.RegularExpressions.Regex.Replace(str, @"([a-z])([0-9])", "$1 $2");
+            str = System.Text.RegularExpressions.Regex.Replace(str, @"([0-9])([a-z])", "$1 $2");
+
+            // Remove special chars
+            str = System.Text.RegularExpressions.Regex.Replace(str, @"[^a-z0-9\s]", "");
+
+            // Collapse spaces
+            str = System.Text.RegularExpressions.Regex.Replace(str, @"\s+", " ");
+
+            return str.Trim();
+        }
         public static bool IsAsOnDate(string value)
         {
             return TryParseAsOnDate(value, out _);
@@ -186,9 +280,10 @@ namespace mutual_fund_backend.Services
         public static bool TryParseAsOnDate(string value, out DateTime date)
         {
             date = DateTime.MinValue;
+            string lowerValue = value.ToLower();
 
             // Must contain as on / ended
-            if (!value.Contains("as on"))
+            if (!lowerValue.Contains("as on") && !lowerValue.Contains("ended") && !lowerValue.Contains("date"))
                 return false;
 
             // 🔍 Extract date-like part ONLY

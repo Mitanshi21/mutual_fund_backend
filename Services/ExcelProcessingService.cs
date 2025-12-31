@@ -5,6 +5,7 @@ using mutual_fund_backend.Data;
 using mutual_fund_backend.Models;
 using mutual_fund_backend.Services;
 using Newtonsoft.Json;
+using System.Text.RegularExpressions;
 
 public class ExcelProcessingService
 {
@@ -14,14 +15,27 @@ public class ExcelProcessingService
     {
         _context = context;
     }
-    public async Task ProcessExcel(string filePath, int amc_Id, int portfolio_Type_Id)
+    public async Task<List<string>> ProcessExcel(string filePath, int amc_Id, int portfolio_Type_Id)
     {
-        if (!File.Exists(filePath)) return;
+        int rowCount = 0;
+        var warnings = new List<string>();
+        if (!File.Exists(filePath)) return warnings;
+
+        var dbFunds = await _context.Funds
+        .Where(f => f.amc_id == amc_Id)
+        .Select(f => f.scheme_name)
+        .ToListAsync();
+
+        // Normalize them immediately for matching
+        var validFundNames = dbFunds
+            .Select(n => NormalizeNameAggressive(n))
+            .ToHashSet();
 
         // 1. Create Upload Record
         var uploadEntry = new UploadEntry
         {
             fileName = Path.GetFileName(filePath),
+            disclosure_portfolio_id = portfolio_Type_Id,
             created_at = DateTime.Now
         };
         _context.Uploads.Add(uploadEntry);
@@ -51,13 +65,16 @@ public class ExcelProcessingService
 
             while (reader.Read()) // Loop Rows
             {
+                rowCount++;
+                // Print a "heartbeat" every 100 rows so you know it's alive
+                if (rowCount % 20 == 0) Console.WriteLine($"[Processing] Row {rowCount}...");
                 var rowValues = new List<string>();
                 for (int i = 0; i < reader.FieldCount; i++)
                     rowValues.Add(ReadCellAsDisplayed(reader, i));
 
-                Console.WriteLine(rowValues.ToString());
+                //Console.WriteLine(rowValues.ToString());
                 // Analyze semantic type
-                var result = ExcelSemanticStructureDetector.Analyze(rowValues);
+                var result = ExcelSemanticStructureDetector.Analyze(rowValues, validFundNames);
 
                 switch (result.Type)
                 {
@@ -65,10 +82,17 @@ public class ExcelProcessingService
                         // Logic: Create or Get Fund
                         if (currentFund == null)
                         {
-                            if (result.LooksLikeFund)
-                            {
+                            //if (result.LooksLikeFund)
+                            //{
                                 currentFund = await GetOrCreateFund(amc_Id, result.Value);
+                            if (currentFund == null)
+                            {
+                             
+                                Console.WriteLine($"Skipping sheet because fund '{sheetName}' is not in Master Table.");
+                                warnings.Add($"Sheet '{sheetName}': Fund '{result.Value}' was not found in Master DB.");
                             }
+
+                            //}
                         }
                         // 🟠 CASE 2: Already have a fund? -> Check if it's Data or Section
                         else
@@ -106,6 +130,7 @@ public class ExcelProcessingService
                         //    string fundName = result.Value;
                         //    currentFund = await GetOrCreateFund(amc_Id, fundName);
                         //}
+                        Console.WriteLine("AMC Name:" + currentFund);
                         break;
 
                     case SemanticRowType.AsOnDate:
@@ -135,6 +160,7 @@ public class ExcelProcessingService
                                 await _context.SaveChangesAsync();
                             }
                         }
+                        Console.WriteLine("AsOnDate:" + currentAsOnDate);
                         break;
 
                     case SemanticRowType.Section:
@@ -164,11 +190,13 @@ public class ExcelProcessingService
                                 await _context.SaveChangesAsync();
                             }
                         }
+                        Console.WriteLine("Current Section:" + currentSection);
                         break;
 
                     case SemanticRowType.Header:
                         // Logic: Map columns based on names found in this row
                         currentMap = MapColumns(rowValues);
+                        Console.WriteLine("Header:" + currentMap);
                         break;
 
                     case SemanticRowType.Data:
@@ -176,7 +204,14 @@ public class ExcelProcessingService
                         if (currentSnapshot != null && currentMap != null)
                         {
                             await ProcessDataRow(rowValues, currentMap, currentSnapshot.id, currentSection?.id);
+
+                            if (rowCount % 20 == 0)
+                            {
+                                await _context.SaveChangesAsync();
+                                Console.WriteLine($"[Saved] {rowCount} rows commit to DB.");
+                            }
                         }
+                        Console.WriteLine("Data Row:"+rowValues);
                         break;
                     case SemanticRowType.Grand_Total:
                         if (currentSnapshot != null && currentMap != null)
@@ -198,11 +233,13 @@ public class ExcelProcessingService
                                 await _context.SaveChangesAsync();
                             }
                         }
+                        Console.WriteLine("Grand_Total:"+rowValues);
                         break;
                 }
             }
-
+            await _context.SaveChangesAsync();
         } while (reader.NextResult());
+        return warnings;
     }
 
     private async Task ProcessDataRow(List<string> row, ColumnMapping map, int snapshotId, int? headerId)
@@ -267,20 +304,115 @@ public class ExcelProcessingService
 
         _context.PortfolioHoldings.Add(holding);
         // Batch saving is better for performance, but line-by-line is safer for debugging logic now
-        await _context.SaveChangesAsync();
+        //await _context.SaveChangesAsync();
     }
+
+    //private async Task<Fund> GetOrCreateFund(int amcId, string fundName)
+    //{
+    //    // 1. Fix Syntax: Get Index of Hyphen first
+    //    string cleanExcelName = fundName;
+    //    int hyphenIndex = fundName.IndexOf('-');
+
+    //    // Safety: Only substring if hyphen exists
+    //    if (hyphenIndex > 0)
+    //    {
+    //        cleanExcelName = fundName.Substring(0, hyphenIndex);
+    //    }
+
+    //    // 2. Normalization: Essential for matching Excel to DB
+    //    cleanExcelName = cleanExcelName.Trim();
+    //    Console.WriteLine($"[INFO] Looking up Fund: '{fundName}' (Cleaned: '{cleanExcelName}')");
+
+    //    // 3. Database Query
+    //    // Note: We use .FirstOrDefaultAsync() (Async version)
+    //    var match = await _context.Funds
+    //        .Where(f => f.amc_id == amcId) // 🛑 IMPORTANT: Filter by AMC first!
+    //        .Where(f => f.scheme_name.Contains(cleanExcelName) || cleanExcelName.Contains(f.scheme_name))
+    //        .FirstOrDefaultAsync();
+
+    //    if (match != null)
+    //    {
+    //        return match;
+    //    }
+
+    //    Console.WriteLine($"[WARNING] Could not find a matching fund in DB for: {fundName} (Cleaned: {cleanExcelName})");
+    //    //string warning = $"[WARNING] Could not find a matching fund in DB for: {fundName} (Cleaned: {cleanExcelName})";
+    //    //warnings.Add(warning);
+    //    return null;
+    //}
+    //
 
     private async Task<Fund> GetOrCreateFund(int amcId, string fundName)
     {
-        var fund = await _context.Funds.FirstOrDefaultAsync(f => f.fund_name == fundName && f.amc_id == amcId);
-        if (fund == null)
-        {
-            fund = new Fund { amc_id = amcId, fund_name = fundName };
-            _context.Funds.Add(fund);
-            await _context.SaveChangesAsync();
-        }
-        return fund;
+        // 1. RAW CLEANING: First, aggressive clean to handle "CRISIL-IBX" vs "CRISIL IBX"
+        string cleanExcelName = NormalizeNameAggressive(fundName);
+
+        // 2. Fetch ALL funds for this AMC (Filtering in memory is safer here)
+        var amcFunds = await _context.Funds
+            .Where(f => f.amc_id == amcId)
+            .ToListAsync();
+
+        // 3. FIND MATCH: Compare aggressive clean versions
+        var match = amcFunds
+            .Select(f => new { Fund = f, CleanDbName = NormalizeNameAggressive(f.scheme_name) })
+            // Match if one contains the other
+            .Where(x => x.CleanDbName.Contains(cleanExcelName) || cleanExcelName.Contains(x.CleanDbName))
+            // Order by length to get the most specific match (avoids generic "Axis Bond" matching specific funds)
+            .OrderByDescending(x => x.CleanDbName.Length)
+            .Select(x => x.Fund)
+            .FirstOrDefault();
+
+        if (match != null) return match;
+
+        Console.WriteLine($"[WARNING] Could not find a matching fund in DB for: {fundName} (Cleaned: {cleanExcelName})");
+        return null;
     }
+
+    // 🟢 HELPER: Aggressive Normalization
+    // Removes hyphens, dots, special chars so "CRISIL-IBX" == "CRISIL IBX"
+    private string NormalizeNameAggressive(string input)
+    {
+        if (string.IsNullOrWhiteSpace(input)) return "";
+
+        string str = input.ToLower();
+
+        // 1. Standardize Months (Full Name -> 3 Letters)
+        // This solves "September 2027" vs "Sep 2027"
+        str = str.Replace("january", "jan")
+                 .Replace("february", "feb")
+                 .Replace("march", "mar")
+                 .Replace("april", "apr")
+                 .Replace("june", "jun")
+                 .Replace("july", "jul")
+                 .Replace("august", "aug")
+                 .Replace("september", "sep").Replace("sept", "sep") // Handle "Sept" too
+                 .Replace("october", "oct")
+                 .Replace("november", "nov")
+                 .Replace("december", "dec");
+
+        // 2. Replace separators with spaces
+        str = str.Replace('-', ' ').Replace('_', ' ').Replace('.', ' ').Replace(':', ' ');
+
+        // 3. Force space between Letters and Numbers ("IBX50" -> "IBX 50")
+        str = System.Text.RegularExpressions.Regex.Replace(str, @"([a-z])([0-9])", "$1 $2");
+        str = System.Text.RegularExpressions.Regex.Replace(str, @"([0-9])([a-z])", "$1 $2");
+
+        // 4. Remove non-alphanumeric characters
+        str = System.Text.RegularExpressions.Regex.Replace(str, @"[^a-z0-9\s]", "");
+
+        // 5. Collapse multiple spaces
+        str = System.Text.RegularExpressions.Regex.Replace(str, @"\s+", " ");
+
+        return str.Trim();
+    }
+    //var fund = await _context.Funds.FirstOrDefaultAsync(f => f.scheme_name == fundName && f.amc_id == amcId);
+    //if (fund == null)
+    //{
+    //    fund = new Fund { amc_id = amcId, scheme_name = fundName };
+    //    _context.Funds.Add(fund);
+    //    await _context.SaveChangesAsync();
+    //}
+    //return fund;
 
     private ColumnMapping MapColumns(List<string> row)
     {
