@@ -225,7 +225,7 @@ namespace mutual_fund_backend.Services
 
             foreach (var cell in cells)
             {
-                // 1. Normalize the cell value EXACTLY like we did for the DB list
+
                 string normalizedCell = NormalizeNameAggressive(cell);
 
                 // 2. CHECK: Does this exist in our whitelist?
@@ -234,7 +234,6 @@ namespace mutual_fund_backend.Services
                     return cell; // ✅ FOUND IT! Return the original string.
                 }
 
-                // 3. (Optional) Partial Match Fallback
                 // If exact match fails, check if the DB name contains this cell or vice versa
                 // useful if Excel has "Axis Bluechip" but DB has "Axis Bluechip Fund"
                 bool partialMatch = validFundNames.Any(dbName => dbName.Contains(normalizedCell) || normalizedCell.Contains(dbName));
@@ -244,7 +243,6 @@ namespace mutual_fund_backend.Services
             return null;
         }
 
-        // 🟢 Re-use your Aggressive Normalizer here (Make it public static so Detector can use it)
         public static string NormalizeNameAggressive(string input)
         {
             if (string.IsNullOrWhiteSpace(input)) return "";
@@ -362,9 +360,6 @@ namespace mutual_fund_backend.Services
 
             return true;
         }
-
-
-
     }
 }
 

@@ -19,99 +19,217 @@ public class ExcelProcessingService
     {
         int rowCount = 0;
         var warnings = new List<string>();
-        if (!File.Exists(filePath)) return warnings;
-
-        var dbFunds = await _context.Funds
-        .Where(f => f.amc_id == amc_Id)
-        .Select(f => f.scheme_name)
-        .ToListAsync();
-
-        // Normalize them immediately for matching
-        var validFundNames = dbFunds
-            .Select(n => NormalizeNameAggressive(n))
-            .ToHashSet();
-
-        // 1. Create Upload Record
-        var uploadEntry = new UploadEntry
+        if (!File.Exists(filePath))
         {
-            fileName = Path.GetFileName(filePath),
-            disclosure_portfolio_id = portfolio_Type_Id,
-            created_at = DateTime.Now
-        };
-        _context.Uploads.Add(uploadEntry);
-        await _context.SaveChangesAsync();
+            warnings.Add("File not found on server.");
+            return warnings;
+        }
 
-        using var stream = File.Open(filePath, FileMode.Open, FileAccess.Read);
-        using var reader = ExcelReaderFactory.CreateReader(stream);
+        // 1. Start a Database Transaction
+        // This ensures that if we find a duplicate file halfway through, 
+        // we can rollback any partial data inserted (e.g. Holdings/Snapshots).
+        using var transaction = await _context.Database.BeginTransactionAsync();
 
-        // === STATE VARIABLES ===
-        int currentUploadId = uploadEntry.id;
-        Fund currentFund = null;
-        PortfolioSnapshot currentSnapshot = null;
-        InstrumentHeader currentSection = null;
-        DateTime? currentAsOnDate = null;
-        ColumnMapping currentMap = null;
-
-        do // Loop Sheets
+        try
         {
-            // Reset per sheet (except Upload ID)
-            currentFund = null;
-            currentSnapshot = null;
-            currentSection = null;
-            currentAsOnDate = null;
-            currentMap = null;
 
-            string sheetName = reader.Name;
 
-            while (reader.Read()) // Loop Rows
+            var dbFunds = await _context.Funds
+            .Where(f => f.amc_id == amc_Id)
+            .Select(f => f.scheme_name)
+            .ToListAsync();
+
+            // Normalize them immediately for matching
+            var validFundNames = dbFunds
+                .Select(n => NormalizeNameAggressive(n))
+                .ToHashSet();
+            // Fetch AMC Name and Portfolio Type Name for the filename
+            var amcName = await _context.AMCs
+                .Where(a => a.id == amc_Id)
+                .Select(a => a.amcname)
+                .FirstOrDefaultAsync() ?? "UnknownAMC";
+
+            var portfolioTypeName = await _context.PortfolioDisclosures
+                .Where(p => p.id == portfolio_Type_Id)
+                .Select(p => p.portfolio_type)
+                .FirstOrDefaultAsync() ?? "UnknownType";
+            // 1. Create Upload Record
+            var uploadEntry = new UploadEntry
             {
-                rowCount++;
-                // Print a "heartbeat" every 100 rows so you know it's alive
-                if (rowCount % 20 == 0) Console.WriteLine($"[Processing] Row {rowCount}...");
-                var rowValues = new List<string>();
-                for (int i = 0; i < reader.FieldCount; i++)
-                    rowValues.Add(ReadCellAsDisplayed(reader, i));
+                fileName = Path.GetFileName(filePath),
+                disclosure_portfolio_id = portfolio_Type_Id,
+                created_at = DateTime.Now
+            };
+            _context.Uploads.Add(uploadEntry);
+            await _context.SaveChangesAsync();
 
-                //Console.WriteLine(rowValues.ToString());
-                // Analyze semantic type
-                var result = ExcelSemanticStructureDetector.Analyze(rowValues, validFundNames);
+            DateTime? finalDateForFilename = null;
+            bool isDuplicateFile = false;
 
-                switch (result.Type)
+            using var stream = File.Open(filePath, FileMode.Open, FileAccess.Read);
+            using (var reader = ExcelReaderFactory.CreateReader(stream))
+            {
+                // === STATE VARIABLES ===
+                int currentUploadId = uploadEntry.id;
+                Fund currentFund = null;
+                PortfolioSnapshot currentSnapshot = null;
+                InstrumentHeader currentSection = null;
+                DateTime? currentAsOnDate = null;
+                ColumnMapping currentMap = null;
+
+                do // Loop Sheets
                 {
-                    case SemanticRowType.AmcName:
-                        // Logic: Create or Get Fund
-                        if (currentFund == null)
-                        {
-                            //if (result.LooksLikeFund)
-                            //{
-                                currentFund = await GetOrCreateFund(amc_Id, result.Value);
-                            if (currentFund == null)
-                            {
-                             
-                                Console.WriteLine($"Skipping sheet because fund '{sheetName}' is not in Master Table.");
-                                warnings.Add($"Sheet '{sheetName}': Fund '{result.Value}' was not found in Master DB.");
-                            }
+                    if (isDuplicateFile) break;
+                    // Reset per sheet (except Upload ID)
+                    currentFund = null;
+                    currentSnapshot = null;
+                    currentSection = null;
+                    currentAsOnDate = null;
+                    currentMap = null;
 
-                            //}
-                        }
-                        // 🟠 CASE 2: Already have a fund? -> Check if it's Data or Section
-                        else
+                    string sheetName = reader.Name;
+                    // Flag to prevent adding the same warning 100 times inside the row loop if you wanted to check there
+                    bool hasLoggedDataError = false;
+
+                    while (reader.Read()) // Loop Rows
+                    {
+                        if (isDuplicateFile) break;
+                        rowCount++;
+                        // Print a "heartbeat" every 100 rows so you know it's alive
+                        if (rowCount % 20 == 0) Console.WriteLine($"[Processing] Row {rowCount}...");
+                        var rowValues = new List<string>();
+                        for (int i = 0; i < reader.FieldCount; i++)
+                            rowValues.Add(ReadCellAsDisplayed(reader, i));
+
+                        //Console.WriteLine(rowValues.ToString());
+                        // Analyze semantic type
+                        var result = ExcelSemanticStructureDetector.Analyze(rowValues, validFundNames);
+
+                        switch (result.Type)
                         {
-                            // Check: Is it actually a Data Row? (User Requirement)
-                            if (ExcelSemanticStructureDetector.IsDataRow(rowValues))
-                            {
-                                if (currentSnapshot != null && currentMap != null)
+                            case SemanticRowType.AmcName:
+                                // Logic: Create or Get Fund
+                                if (currentFund == null)
                                 {
-                                    await ProcessDataRow(rowValues, currentMap, currentSnapshot.id, currentSection.id);
+                                    //if (result.LooksLikeFund)
+                                    //{
+                                    currentFund = await GetOrCreateFund(amc_Id, result.Value);
+                                    if (currentFund == null)
+                                    {
+
+                                        Console.WriteLine($"Skipping sheet because fund '{sheetName}' is not in Master Table.");
+                                        warnings.Add($"Sheet '{sheetName}': Fund '{result.Value}' was not found in Master DB.");
+                                    }
+
+                                    //}
                                 }
-                            }
-                            // Check: If not Data, treat as SECTION (e.g. "Mutual Fund Units")
-                            else
-                            {
+                                // 🟠 CASE 2: Already have a fund? -> Check if it's Data or Section
+                                else
+                                {
+                                    // Check: Is it actually a Data Row? (User Requirement)
+                                    if (ExcelSemanticStructureDetector.IsDataRow(rowValues))
+                                    {
+                                        if (currentSnapshot != null && currentMap != null)
+                                        {
+                                            await ProcessDataRow(rowValues, currentMap, currentSnapshot.id, currentSection.id);
+                                        }
+                                    }
+                                    // Check: If not Data, treat as SECTION (e.g. "Mutual Fund Units")
+                                    else
+                                    {
+                                        if (currentSnapshot != null)
+                                        {
+                                            currentSection = await _context.InstrumentHeaders
+                .FirstOrDefaultAsync(h => h.instrument_header_name == result.Value);
+                                            if (currentSection == null)
+                                            {
+                                                currentSection = new InstrumentHeader
+                                                {
+                                                    // snapshot_id = currentSnapshot.id, // <--- REMOVE THIS LINE
+                                                    instrument_header_name = result.Value
+                                                };
+                                                _context.InstrumentHeaders.Add(currentSection);
+                                                await _context.SaveChangesAsync();
+                                            }
+                                        }
+                                    }
+                                }
+                                //if (currentFund==null && result.LooksLikeFund)
+                                //{
+                                //    string fundName = result.Value;
+                                //    currentFund = await GetOrCreateFund(amc_Id, fundName);
+                                //}
+                                Console.WriteLine("AMC Name:" + currentFund);
+                                break;
+
+                            case SemanticRowType.AsOnDate:
+                                // Logic: Create Snapshot
+                                if (currentAsOnDate == null)
+                                {
+                                    if (DateTime.TryParse(result.Value.Replace("Monthly Portfolio Statement as on", "").Trim(), out DateTime dt))
+                                    {
+                                        currentAsOnDate = dt;
+                                    }
+                                    else
+                                    {
+                                        // Fallback parser if the semantic detector extracted raw text
+                                        ExcelSemanticStructureDetector.TryParseAsOnDate(result.Value, out dt);
+                                        currentAsOnDate = dt;
+                                    }
+                                    if (finalDateForFilename == null && currentAsOnDate != null && currentAsOnDate != DateTime.MinValue)
+                                    {
+                                        finalDateForFilename = currentAsOnDate;
+                                        // Construct the Target Filename
+                                        string dateStr = finalDateForFilename.Value.ToString("yyyy-MM-dd");
+                                        string sanitizedAmc = SanitizeFileName(amcName);
+                                        string sanitizedType = SanitizeFileName(portfolioTypeName);
+                                        string extension = Path.GetExtension(filePath);
+                                        string targetFileName = $"{sanitizedAmc}_{dateStr}_{sanitizedType}{extension}";
+
+                                        // Check DB for Duplicate
+                                        // We ignore the ID of the current upload we just inserted
+                                        bool exists = await _context.Uploads
+                                            .AnyAsync(u => u.fileName == targetFileName && u.id != currentUploadId);
+
+                                        if (exists)
+                                        {
+                                            isDuplicateFile = true;
+                                            warnings.Add($"[Duplicate Abort] A file named '{targetFileName}' already exists in the system. Processing stopped.");
+                                            break; // Break the Switch
+                                        }
+                                    }
+                                    if (currentFund != null && currentAsOnDate != null)
+                                    {
+                                        currentSnapshot = new PortfolioSnapshot
+                                        {
+                                            fund_id = currentFund.id,
+                                            upload_id = currentUploadId,
+                                            as_on_date = currentAsOnDate.Value,
+                                            sheet_name = sheetName
+                                        };
+                                        _context.PortfolioSnapshots.Add(currentSnapshot);
+                                        await _context.SaveChangesAsync();
+                                    }
+                                }
+                                Console.WriteLine("AsOnDate:" + currentAsOnDate);
+                                break;
+
+                            case SemanticRowType.Section:
+                                // Logic: Create Instrument Header (e.g., "Equity & Equity Related")
                                 if (currentSnapshot != null)
                                 {
+
+                                    //currentSection = new InstrumentHeader
+                                    //{
+                                    //    snapshot_id = currentSnapshot.id,
+                                    //    instrument_header_name = result.Value
+                                    //};
+                                    //_context.InstrumentHeaders.Add(currentSection);
+                                    //await _context.SaveChangesAsync();
+
                                     currentSection = await _context.InstrumentHeaders
-        .FirstOrDefaultAsync(h => h.instrument_header_name == result.Value);
+                .FirstOrDefaultAsync(h => h.instrument_header_name == result.Value);
+
                                     if (currentSection == null)
                                     {
                                         currentSection = new InstrumentHeader
@@ -123,123 +241,157 @@ public class ExcelProcessingService
                                         await _context.SaveChangesAsync();
                                     }
                                 }
-                            }
-                        }
-                        //if (currentFund==null && result.LooksLikeFund)
-                        //{
-                        //    string fundName = result.Value;
-                        //    currentFund = await GetOrCreateFund(amc_Id, fundName);
-                        //}
-                        Console.WriteLine("AMC Name:" + currentFund);
-                        break;
+                                Console.WriteLine("Current Section:" + currentSection);
+                                break;
 
-                    case SemanticRowType.AsOnDate:
-                        // Logic: Create Snapshot
-                        if(currentAsOnDate == null)
-                        {
-                            if (DateTime.TryParse(result.Value.Replace("Monthly Portfolio Statement as on", "").Trim(), out DateTime dt))
-                            {
-                                currentAsOnDate = dt;
-                            }
-                            else
-                            {
-                                // Fallback parser if the semantic detector extracted raw text
-                                ExcelSemanticStructureDetector.TryParseAsOnDate(result.Value, out dt);
-                                currentAsOnDate = dt;
-                            }
-                            if (currentFund != null && currentAsOnDate != null)
-                            {
-                                currentSnapshot = new PortfolioSnapshot
+                            case SemanticRowType.Header:
+                                // Logic: Map columns based on names found in this row
+                                currentMap = MapColumns(rowValues);
+                                Console.WriteLine("Header:" + currentMap);
+                                break;
+
+                            case SemanticRowType.Data:
+                                // Logic: Insert Holding
+                                if (currentSnapshot != null && currentMap != null)
                                 {
-                                    fund_id = currentFund.id,
-                                    upload_id = currentUploadId,
-                                    as_on_date = currentAsOnDate.Value,
-                                    sheet_name = sheetName
-                                };
-                                _context.PortfolioSnapshots.Add(currentSnapshot);
-                                await _context.SaveChangesAsync();
-                            }
-                        }
-                        Console.WriteLine("AsOnDate:" + currentAsOnDate);
-                        break;
+                                    await ProcessDataRow(rowValues, currentMap, currentSnapshot.id, currentSection?.id);
 
-                    case SemanticRowType.Section:
-                        // Logic: Create Instrument Header (e.g., "Equity & Equity Related")
-                        if (currentSnapshot != null)
-                        {
-
-                            //currentSection = new InstrumentHeader
-                            //{
-                            //    snapshot_id = currentSnapshot.id,
-                            //    instrument_header_name = result.Value
-                            //};
-                            //_context.InstrumentHeaders.Add(currentSection);
-                            //await _context.SaveChangesAsync();
-
-                            currentSection = await _context.InstrumentHeaders
-        .FirstOrDefaultAsync(h => h.instrument_header_name == result.Value);
-
-                            if (currentSection == null)
-                            {
-                                currentSection = new InstrumentHeader
+                                    if (rowCount % 20 == 0)
+                                    {
+                                        await _context.SaveChangesAsync();
+                                        Console.WriteLine($"[Saved] {rowCount} rows commit to DB.");
+                                    }
+                                }
+                                else if (currentSnapshot == null && currentFund != null && !hasLoggedDataError)
                                 {
-                                    // snapshot_id = currentSnapshot.id, // <--- REMOVE THIS LINE
-                                    instrument_header_name = result.Value
-                                };
-                                _context.InstrumentHeaders.Add(currentSection);
-                                await _context.SaveChangesAsync();
-                            }
+                                    // Optional: Detect if we are hitting data rows but haven't found a date yet.
+                                    // This catches cases where Date is at the bottom (Footer) which is rare but possible,
+                                    // or completely missing.
+                                    hasLoggedDataError = true; // Mark true so we don't spam the warning list
+                                }
+                                Console.WriteLine("Data Row:" + rowValues);
+                                break;
+                            case SemanticRowType.Grand_Total:
+                                if (currentSnapshot != null && currentMap != null)
+                                {
+                                    // 1. Identify which column has the Market Value
+                                    // (Usually Grand Total is in the Market Value column)
+                                    string valStr = GetValue(rowValues, currentMap.MarketValIdx);
+
+                                    // 2. Parse it
+                                    double? totalVal = ParseDouble(valStr);
+
+                                    if (totalVal.HasValue)
+                                    {
+                                        // 3. Update the EXISTING snapshot object
+                                        // EF Core is tracking 'currentSnapshot', so we just set the property 
+                                        // and call SaveChangesAsync() to perform an UPDATE query.
+                                        currentSnapshot.grand_total = totalVal.Value;
+
+                                        await _context.SaveChangesAsync();
+                                    }
+                                }
+                                Console.WriteLine("Grand_Total:" + rowValues);
+                                break;
                         }
-                        Console.WriteLine("Current Section:" + currentSection);
-                        break;
+                    }
+                    // 1. If we found a valid Fund, but never found the Date
+                    if (currentFund != null && currentAsOnDate == null)
+                    {
+                        warnings.Add($"Sheet '{sheetName}': Skipped. 'As On Date' was not found.");
+                    }
+                    // 2. Edge case: Found Fund AND Date, but Snapshot creation failed (unlikely, but safe)
+                    else if (currentFund != null && currentAsOnDate != null && currentSnapshot == null)
+                    {
+                        warnings.Add($"Sheet '{sheetName}': Error. Fund and Date found, but Snapshot could not be created.");
+                    }
+                    await _context.SaveChangesAsync();
+                } while (reader.NextResult());
+            }
+            // =========================================================
+            // 4. RENAME FILE LOGIC (Safe to do now that file is closed)
+            // =========================================================
+            if (isDuplicateFile)
+            {
+                // ROLLBACK: Undo database changes (UploadEntry, Snapshots, Holdings)
+                await transaction.RollbackAsync();
 
-                    case SemanticRowType.Header:
-                        // Logic: Map columns based on names found in this row
-                        currentMap = MapColumns(rowValues);
-                        Console.WriteLine("Header:" + currentMap);
-                        break;
+                // DELETE: Remove the temporary file from the server
+                try { File.Delete(filePath); } catch { /* Ignore file lock issues */ }
 
-                    case SemanticRowType.Data:
-                        // Logic: Insert Holding
-                        if (currentSnapshot != null && currentMap != null)
+                return warnings; // Return the specific duplicate warning
+            }
+            else
+            {
+                if (finalDateForFilename.HasValue)
+                {
+                    try
+                    {
+                        string directory = Path.GetDirectoryName(filePath);
+                        string extension = Path.GetExtension(filePath);
+
+                        // Format: AMCName_AsOnDate_Portfolio_Type
+                        string dateStr = finalDateForFilename.Value.ToString("yyyy-MM-dd");
+                        string sanitizedAmc = SanitizeFileName(amcName);
+                        string sanitizedType = SanitizeFileName(portfolioTypeName);
+
+                        string newFileName = $"{sanitizedAmc}_{dateStr}_{sanitizedType}{extension}";
+                        string newFilePath = Path.Combine(directory, newFileName);
+
+                        // Check if file exists, append counter if needed to prevent crash
+                        if (File.Exists(newFilePath))
                         {
-                            await ProcessDataRow(rowValues, currentMap, currentSnapshot.id, currentSection?.id);
+                            // Option 1: Overwrite (Delete old, move new)
+                            File.Delete(newFilePath);
 
-                            if (rowCount % 20 == 0)
-                            {
-                                await _context.SaveChangesAsync();
-                                Console.WriteLine($"[Saved] {rowCount} rows commit to DB.");
-                            }
+                            // Option 2: Append timestamp to make unique (if you prefer not to overwrite)
+                            // newFileName = $"{sanitizedAmc}_{dateStr}_{sanitizedType}_{DateTime.Now.Ticks}{extension}";
+                            // newFilePath = Path.Combine(directory, newFileName);
                         }
-                        Console.WriteLine("Data Row:"+rowValues);
-                        break;
-                    case SemanticRowType.Grand_Total:
-                        if (currentSnapshot != null && currentMap != null)
-                        {
-                            // 1. Identify which column has the Market Value
-                            // (Usually Grand Total is in the Market Value column)
-                            string valStr = GetValue(rowValues, currentMap.MarketValIdx);
 
-                            // 2. Parse it
-                            double? totalVal = ParseDouble(valStr);
+                        // Perform the Rename (Move)
+                        File.Move(filePath, newFilePath);
 
-                            if (totalVal.HasValue)
-                            {
-                                // 3. Update the EXISTING snapshot object
-                                // EF Core is tracking 'currentSnapshot', so we just set the property 
-                                // and call SaveChangesAsync() to perform an UPDATE query.
-                                currentSnapshot.grand_total = totalVal.Value;
+                        // Update Database Record
+                        uploadEntry.fileName = newFileName;
+                        _context.Uploads.Update(uploadEntry);
+                        await _context.SaveChangesAsync();
 
-                                await _context.SaveChangesAsync();
-                            }
-                        }
-                        Console.WriteLine("Grand_Total:"+rowValues);
-                        break;
+                        Console.WriteLine($"[Success] File renamed to: {newFileName}");
+                    }
+                    catch (Exception ex)
+                    {
+                        // If renaming fails, we log it but don't fail the whole process
+                        warnings.Add($"Processing successful, but failed to rename file: {ex.Message}");
+                        Console.WriteLine($"[Error] Could not rename file: {ex.Message}");
+                    }
+                }
+
+                else
+                {
+                    warnings.Add("Could not rename file because no 'As On Date' was found in the Excel data.");
                 }
             }
-            await _context.SaveChangesAsync();
-        } while (reader.NextResult());
+            // COMMIT: Persist all data
+            await transaction.CommitAsync();
+        }
+        catch (Exception ex)
+        {
+            await transaction.RollbackAsync();
+            warnings.Add($"Critical Error: {ex.Message}");
+            // Cleanup temp file on error
+            if (File.Exists(filePath)) File.Delete(filePath);
+        }
+
         return warnings;
+    }
+    // Helper for sanitizing filenames (Duplicate from controller or make this static public in a utility class)
+    private static string SanitizeFileName(string value)
+    {
+        if (string.IsNullOrEmpty(value)) return "Unknown";
+        foreach (char c in Path.GetInvalidFileNameChars())
+            value = value.Replace(c, '_');
+        return value.Replace(" ", "_");
     }
 
     private async Task ProcessDataRow(List<string> row, ColumnMapping map, int snapshotId, int? headerId)
@@ -252,6 +404,7 @@ public class ExcelProcessingService
         string marketValStr = GetValue(row, map.MarketValIdx);
         string pctStr = GetValue(row, map.PctIdx);
         string ytmStr = GetValue(row, map.YtmIdx);
+        string ytcStr = GetValue(row, map.YtcIdx);
 
         if (string.IsNullOrEmpty(name)) return;
 
@@ -427,6 +580,7 @@ public class ExcelProcessingService
             else if (val.Contains("market") || val.Contains("fair value")) map.MarketValIdx = i;
             else if (val.Contains("% to net assets")) map.PctIdx = i;
             else if (val.Contains("ytm")) map.YtmIdx = i;
+            else if (val.Contains("ytc")) map.YtcIdx = i;
         }
         return map;
     }
@@ -470,5 +624,7 @@ public class ExcelProcessingService
         public int MarketValIdx { get; set; } = -1;
         public int PctIdx { get; set; } = -1;
         public int YtmIdx { get; set; } = -1;
+
+        public int YtcIdx { get; set; } = -1;
     }
 }

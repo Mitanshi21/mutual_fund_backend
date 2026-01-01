@@ -90,7 +90,7 @@ namespace mutual_fund_backend.Controllers
             });
         }
 
-        private static string SanitizeFileName(string value)
+        public static string SanitizeFileName(string value)
         {
             if (string.IsNullOrEmpty(value)) return "Unknown"; // Safety check
             foreach (char c in Path.GetInvalidFileNameChars())
