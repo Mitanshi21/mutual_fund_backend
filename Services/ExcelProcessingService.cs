@@ -10,19 +10,20 @@ using System.Text.RegularExpressions;
 public class ExcelProcessingService
 {
     private readonly AppDbContext _context;
-
-    public ExcelProcessingService(AppDbContext context)
+    private readonly ILogger<ExcelProcessingService> _logger;
+    public ExcelProcessingService(AppDbContext context, ILogger<ExcelProcessingService> logger)
     {
         _context = context;
+        _logger = logger;
     }
-    public async Task<List<string>> ProcessExcel(string filePath, int amc_Id, int portfolio_Type_Id)
+    public async Task ProcessExcel(string filePath, int amc_Id, int portfolio_Type_Id)
     {
         int rowCount = 0;
-        var warnings = new List<string>();
+        //var warnings = new List<string>();
         if (!File.Exists(filePath))
         {
-            warnings.Add("File not found on server.");
-            return warnings;
+            _logger.LogError("File not found at path: {FilePath}", filePath);
+            return;
         }
 
         // 1. Start a Database Transaction
@@ -118,7 +119,7 @@ public class ExcelProcessingService
                                     {
 
                                         Console.WriteLine($"Skipping sheet because fund '{sheetName}' is not in Master Table.");
-                                        warnings.Add($"Sheet '{sheetName}': Fund '{result.Value}' was not found in Master DB.");
+                                        _logger.LogWarning($"Sheet '{sheetName}': Fund '{result.Value}' was not found in Master DB.");
                                     }
 
                                     //}
@@ -194,7 +195,7 @@ public class ExcelProcessingService
                                         if (exists)
                                         {
                                             isDuplicateFile = true;
-                                            warnings.Add($"[Duplicate Abort] A file named '{targetFileName}' already exists in the system. Processing stopped.");
+                                            _logger.LogWarning($"[Duplicate Abort] A file named '{targetFileName}' already exists in the system. Processing stopped.");
                                             break; // Break the Switch
                                         }
                                     }
@@ -216,32 +217,58 @@ public class ExcelProcessingService
 
                             case SemanticRowType.Section:
                                 // Logic: Create Instrument Header (e.g., "Equity & Equity Related")
+                                //                if (currentSnapshot != null)
+                                //                {
+
+                                //                    //currentSection = new InstrumentHeader
+                                //                    //{
+                                //                    //    snapshot_id = currentSnapshot.id,
+                                //                    //    instrument_header_name = result.Value
+                                //                    //};
+                                //                    //_context.InstrumentHeaders.Add(currentSection);
+                                //                    //await _context.SaveChangesAsync();
+
+                                //                    currentSection = await _context.InstrumentHeaders
+                                //.FirstOrDefaultAsync(h => h.instrument_header_name == result.Value);
+
+                                //                    if (currentSection == null)
+                                //                    {
+                                //                        currentSection = new InstrumentHeader
+                                //                        {
+                                //                            // snapshot_id = currentSnapshot.id, // <--- REMOVE THIS LINE
+                                //                            instrument_header_name = result.Value
+                                //                        };
+                                //                        _context.InstrumentHeaders.Add(currentSection);
+                                //                        await _context.SaveChangesAsync();
+                                //                    }
+                                //                }
+                                //                Console.WriteLine("Current Section:" + currentSection);
+
                                 if (currentSnapshot != null)
                                 {
+                                    // 1. Try to find the header in the DB (Case-insensitive check is safer)
+                                    // We use local variable first to avoid confusion
+                                    var dbSection = await _context.InstrumentHeaders
+                                        .FirstOrDefaultAsync(h => h.instrument_header_name == result.Value);
 
-                                    //currentSection = new InstrumentHeader
-                                    //{
-                                    //    snapshot_id = currentSnapshot.id,
-                                    //    instrument_header_name = result.Value
-                                    //};
-                                    //_context.InstrumentHeaders.Add(currentSection);
-                                    //await _context.SaveChangesAsync();
-
-                                    currentSection = await _context.InstrumentHeaders
-                .FirstOrDefaultAsync(h => h.instrument_header_name == result.Value);
-
-                                    if (currentSection == null)
+                                    if (dbSection != null)
                                     {
-                                        currentSection = new InstrumentHeader
-                                        {
-                                            // snapshot_id = currentSnapshot.id, // <--- REMOVE THIS LINE
-                                            instrument_header_name = result.Value
-                                        };
-                                        _context.InstrumentHeaders.Add(currentSection);
-                                        await _context.SaveChangesAsync();
+                                        // ✅ FOUND: Use this section for upcoming data rows
+                                        currentSection = dbSection;
+                                        // Optional: Log success if needed
+                                        // _logger.LogInformation($"Using Header: {dbSection.instrument_header_name}"); 
+                                    }
+                                    else
+                                    {
+                                        // ❌ NOT FOUND: Do not create. Log the warning.
+                                        _logger.LogWarning($"Sheet '{sheetName}': Unknown Instrument Header skipped: '{result.Value}'. Data rows under this section will have NULL header_id.");
+
+                                        // ⚠️ IMPORTANT: Reset currentSection to null. 
+                                        // This ensures that data rows don't accidentally get attached 
+                                        // to the *previous* valid section found in the Excel file.
+                                        currentSection = null;
                                     }
                                 }
-                                Console.WriteLine("Current Section:" + currentSection);
                                 break;
 
                             case SemanticRowType.Header:
@@ -252,7 +279,7 @@ public class ExcelProcessingService
 
                             case SemanticRowType.Data:
                                 // Logic: Insert Holding
-                                if (currentSnapshot != null && currentMap != null)
+                                if (currentSnapshot != null && currentMap != null && currentSection != null)
                                 {
                                     await ProcessDataRow(rowValues, currentMap, currentSnapshot.id, currentSection?.id);
 
@@ -298,12 +325,12 @@ public class ExcelProcessingService
                     // 1. If we found a valid Fund, but never found the Date
                     if (currentFund != null && currentAsOnDate == null)
                     {
-                        warnings.Add($"Sheet '{sheetName}': Skipped. 'As On Date' was not found.");
+                        _logger.LogWarning($"Sheet '{sheetName}': Skipped. 'As On Date' was not found.");
                     }
                     // 2. Edge case: Found Fund AND Date, but Snapshot creation failed (unlikely, but safe)
                     else if (currentFund != null && currentAsOnDate != null && currentSnapshot == null)
                     {
-                        warnings.Add($"Sheet '{sheetName}': Error. Fund and Date found, but Snapshot could not be created.");
+                        _logger.LogWarning($"Sheet '{sheetName}': Error. Fund and Date found, but Snapshot could not be created.");
                     }
                     await _context.SaveChangesAsync();
                 } while (reader.NextResult());
@@ -319,7 +346,7 @@ public class ExcelProcessingService
                 // DELETE: Remove the temporary file from the server
                 try { File.Delete(filePath); } catch { /* Ignore file lock issues */ }
 
-                return warnings; // Return the specific duplicate warning
+                return; // Return the specific duplicate warning
             }
             else
             {
@@ -362,14 +389,14 @@ public class ExcelProcessingService
                     catch (Exception ex)
                     {
                         // If renaming fails, we log it but don't fail the whole process
-                        warnings.Add($"Processing successful, but failed to rename file: {ex.Message}");
+                        _logger.LogInformation($"Processing successful, but failed to rename file: {ex.Message}");
                         Console.WriteLine($"[Error] Could not rename file: {ex.Message}");
                     }
                 }
 
                 else
                 {
-                    warnings.Add("Could not rename file because no 'As On Date' was found in the Excel data.");
+                    _logger.LogError("Could not rename file because no 'As On Date' was found in the Excel data.");
                 }
             }
             // COMMIT: Persist all data
@@ -378,12 +405,12 @@ public class ExcelProcessingService
         catch (Exception ex)
         {
             await transaction.RollbackAsync();
-            warnings.Add($"Critical Error: {ex.Message}");
+            _logger.LogError($"Critical Error: {ex.Message}");
             // Cleanup temp file on error
             if (File.Exists(filePath)) File.Delete(filePath);
         }
 
-        return warnings;
+        return;
     }
     // Helper for sanitizing filenames (Duplicate from controller or make this static public in a utility class)
     private static string SanitizeFileName(string value)
@@ -576,7 +603,7 @@ public class ExcelProcessingService
             if (val.Contains("name of the instrument")) map.NameIdx = i;
             else if (val.Contains("isin")) map.IsinIdx = i;
             else if (val.Contains("industry") || val.Contains("rating")) map.IndustryRatingIdx = i;
-            else if (val.Contains("quantity")) map.QtyIdx = i;
+            else if (val.Contains("quantity") || val.Contains("qty")) map.QtyIdx = i;
             else if (val.Contains("market") || val.Contains("fair value")) map.MarketValIdx = i;
             else if (val.Contains("% to net assets")) map.PctIdx = i;
             else if (val.Contains("ytm")) map.YtmIdx = i;

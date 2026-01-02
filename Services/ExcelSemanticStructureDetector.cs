@@ -55,7 +55,8 @@ namespace mutual_fund_backend.Services
         "industry",
         "yield",
         "nav",
-        "rounded % to net assets"
+        "rounded % to net assets",
+        "qty"
     };
 
         private static readonly string[] SkipKeywords =
@@ -75,7 +76,7 @@ namespace mutual_fund_backend.Services
         // ENTRY POINT
         // =============================
 
-        public static SemanticRowResult Analyze(List<string> row, HashSet<string> validFundNames)
+        public static SemanticRowResult Analyze(List<string> row, HashSet<string> validFundNames, HashSet<string> validSectionNames)
         {
             //Console.WriteLine("Row Data: " + string.Join(", ", row));
             var cleaned = row
@@ -136,23 +137,35 @@ namespace mutual_fund_backend.Services
                 return new SemanticRowResult { Type = SemanticRowType.Data };
 
             // 3️⃣ SECTION
-            foreach (var cell in cleaned)
+            //foreach (var cell in cleaned)
+            //{
+            //    // Check if THIS specific cell contains a section keyword
+            //    foreach (var s in SectionKeywords)
+            //    {
+            //        if (cell.ToLower().Contains(s))
+            //        {
+            //            return new SemanticRowResult
+            //            {
+            //                Type = SemanticRowType.Section,
+            //                Value = cell // ✅ Return "Debt Instruments", not "GOI4584"
+            //            };
+            //        }
+            //    }
+            //}
+
+            foreach (var s in cleaned)
             {
-                // Check if THIS specific cell contains a section keyword
-                foreach (var s in SectionKeywords)
+                if (s.Length > 3)
                 {
-                    if (cell.ToLower().Contains(s))
+                    return new SemanticRowResult
                     {
-                        return new SemanticRowResult
-                        {
-                            Type = SemanticRowType.Section,
-                            Value = cell // ✅ Return "Debt Instruments", not "GOI4584"
-                        };
-                    }
+                        Type = SemanticRowType.Section,
+                        Value = s // ✅ Return "Debt Instruments", not "GOI4584"
+                    };
                 }
             }
 
-            // 4️⃣ HEADER
+            //// 4️⃣ HEADER
             int headerMatches = cleaned.Count(cell =>
                 HeaderKeywords.Any(h => cell.ToLower().Contains(h)));
 

@@ -9,10 +9,12 @@ namespace mutual_fund_backend.Controllers
     public class FileUploadController : Controller
     {
         private readonly AppDbContext _context;
+        private readonly ExcelProcessingService _excelService;
 
-        public FileUploadController(AppDbContext context)
+        public FileUploadController(AppDbContext context, ExcelProcessingService excelService)
         {
             _context = context;
+            _excelService = excelService;
         }
 
         [HttpPost("upload-excel")]
@@ -63,30 +65,39 @@ namespace mutual_fund_backend.Controllers
                     }
 
                     // Instantiate the service (Or better: Inject it via Constructor)
-                    var processor = new ExcelProcessingService(_context);
+                    //var processor = new ExcelProcessingService(_context);
 
                     // 2. Capture the warnings returned by the service
-                    List<string> fileWarnings = await processor.ProcessExcel(
-                        path,
-                        row.Amc_Id,
-                        row.Portfolio_Type_Id
-                    );
+                    //List<string> fileWarnings = await processor.ProcessExcel(
+                    //    path,
+                    //    row.Amc_Id,
+                    //    row.Portfolio_Type_Id
+                    //);
 
-                    // 3. Add them to the master list
-                    if (fileWarnings != null && fileWarnings.Count > 0)
+                    await _excelService.ProcessExcel(
+                     path,
+                     row.Amc_Id,
+                     row.Portfolio_Type_Id
+                 );
+
+                               // 3. Generate the URL dynamically
+                // This creates a full URL like: https://localhost:7000/api/FileUpload/logs/today
+                    string logUrl = $"{Request.Scheme}://{Request.Host}/api/FileUpload/logs/today";
+
+                    // 4. Return response with the link
+                    return Ok(new
                     {
-                        masterWarningList.AddRange(fileWarnings);
-                    }
+                        message = "Files processed successfully.",
+                        logDetailsUrl = logUrl,
+                        note = "Click the link above to view/download the execution logs."
+                    });
                 }
             }
 
             // 4. Return the list in the response
             return Ok(new
             {
-                message = masterWarningList.Count > 0 
-                          ? "Processed with warnings" 
-                          : "All rows and files processed successfully",
-                warnings = masterWarningList
+                message = "Files uploaded and processing started. Check server logs for details."
             });
         }
 
@@ -110,6 +121,29 @@ namespace mutual_fund_backend.Controllers
         public class MultiUploadRequest
         {
             public List<UploadRow> Rows { get; set; }
+        }
+
+        [HttpGet("logs/today")]
+        public IActionResult GetTodayLog()
+        {
+            // 1. Determine the file path based on today's date
+            // Serilog rolling file format usually appends the date like: app-log-20250101.txt
+            // Adjust "yyyyMMdd" to match your Serilog config if it differs.
+            string datePart = DateTime.Now.ToString("yyyyMMdd");
+            string fileName = $"app-log-{datePart}.txt";
+            string filePath = Path.Combine(Directory.GetCurrentDirectory(), "logs", fileName);
+
+            if (!System.IO.File.Exists(filePath))
+            {
+                return NotFound(new { message = "No log file generated for today yet." });
+            }
+
+            // 2. Open the file with FileShare.ReadWrite
+            // Important: Serilog keeps the file open for writing. Using FileShare.ReadWrite
+            // allows us to read it without crashing or locking the logger.
+            var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+
+            return File(fileStream, "text/plain", fileName);
         }
     }
 }
